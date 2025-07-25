@@ -64,26 +64,49 @@ function App() {
       itemsFound: 0
     })
 
+    let worker: Tesseract.Worker | null = null
+
     try {
-      const result = await Tesseract.recognize(
-        menuImage,
-        'jpn+eng',
-        {
-          logger: m => {
-            if (m.status === 'recognizing text') {
-              setAnalysisProgress(Math.round(m.progress * 100))
-            }
+      worker = await Tesseract.createWorker(['jpn', 'eng'], 1, {
+        logger: m => {
+          if (m.status === 'recognizing text') {
+            setAnalysisProgress(Math.round(m.progress * 50))
           }
         }
-      )
+      })
 
-      const text = result.data.text
-      const extractedItems = extractDrinkItems(text)
+      const result = await worker.recognize(menuImage)
+      let text = result.data.text
+      let extractedItems = extractDrinkItems(text)
+      
+      if (extractedItems.length === 0 && text.trim().length > 0) {
+        setAnalysisProgress(50)
+        try {
+          await worker.setParameters({
+            tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
+          })
+          
+          const verticalResult = await worker.recognize(menuImage)
+          const verticalText = verticalResult.data.text
+          const verticalItems = extractDrinkItems(verticalText)
+          
+          if (verticalItems.length > 0) {
+            text = verticalText
+            extractedItems = verticalItems
+          }
+          
+          setAnalysisProgress(100)
+        } catch (verticalError) {
+          console.warn('Vertical text recognition failed:', verticalError)
+        }
+      }
       
       if (extractedItems.length === 0) {
         setOcrResult({
           status: 'no-items',
-          message: 'ドリンクアイテムが見つかりませんでした。手動で追加してください。',
+          message: text.trim().length === 0 
+            ? 'テキストが検出されませんでした。画像が鮮明で文字が読みやすいかご確認ください。'
+            : 'ドリンクアイテムが見つかりませんでした。横書き・縦書き両方の認識を試みましたが、該当する項目を特定できませんでした。手動で追加してください。',
           extractedText: text,
           itemsFound: 0
         })
@@ -108,13 +131,37 @@ function App() {
 
     } catch (error) {
       console.error('OCR analysis failed:', error)
+      
+      let errorMessage = '画像解析に失敗しました'
+      
+      if (error instanceof Error) {
+        if (error.message.includes('network') || error.message.includes('fetch') || error.message.includes('NetworkError')) {
+          errorMessage = 'ネットワークエラー: インターネット接続を確認してください'
+        } else if (error.message.includes('load') || error.message.includes('worker') || error.message.includes('Worker')) {
+          errorMessage = 'OCRエンジンの読み込みに失敗しました。ページを再読み込みしてください'
+        } else if (error.message.includes('image') || error.message.includes('format') || error.message.includes('decode')) {
+          errorMessage = '画像形式エラー: JPEGまたはPNG形式の鮮明な画像をお使いください'
+        } else if (error.message.includes('memory') || error.message.includes('size') || error.message.includes('Memory')) {
+          errorMessage = '画像サイズエラー: より小さな画像をお試しください（推奨: 2MB以下）'
+        } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+          errorMessage = 'タイムアウトエラー: 画像が大きすぎる可能性があります。小さな画像でお試しください'
+        } else {
+          errorMessage = `処理エラー: ${error.message}`
+        }
+      } else {
+        errorMessage = '不明なエラーが発生しました。画像を変更してお試しください'
+      }
+      
       setOcrResult({
         status: 'error',
-        message: `画像解析に失敗しました: ${error instanceof Error ? error.message : '不明なエラー'}`,
+        message: errorMessage,
         extractedText: '',
         itemsFound: 0
       })
     } finally {
+      if (worker) {
+        await worker.terminate()
+      }
       setIsAnalyzing(false)
       setAnalysisProgress(0)
     }
