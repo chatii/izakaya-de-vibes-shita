@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Camera, Plus, Minus, Trash2, Upload, Scan, Loader2 } from 'lucide-react'
+import { Camera, Plus, Minus, Trash2, Upload, Scan, Loader2, CheckCircle, XCircle, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -13,6 +13,13 @@ interface DrinkItem {
   count: number
 }
 
+interface OCRResult {
+  status: 'idle' | 'success' | 'error' | 'no-items'
+  message: string
+  extractedText: string
+  itemsFound: number
+}
+
 function App() {
   const [menuImage, setMenuImage] = useState<string | null>(null)
   const [drinkItems, setDrinkItems] = useState<DrinkItem[]>([])
@@ -20,6 +27,12 @@ function App() {
   const [newItemPrice, setNewItemPrice] = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisProgress, setAnalysisProgress] = useState(0)
+  const [ocrResult, setOcrResult] = useState<OCRResult>({
+    status: 'idle',
+    message: '',
+    extractedText: '',
+    itemsFound: 0
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -28,6 +41,12 @@ function App() {
       const reader = new FileReader()
       reader.onload = (e) => {
         setMenuImage(e.target?.result as string)
+        setOcrResult({
+          status: 'idle',
+          message: '',
+          extractedText: '',
+          itemsFound: 0
+        })
       }
       reader.readAsDataURL(file)
     }
@@ -38,6 +57,12 @@ function App() {
 
     setIsAnalyzing(true)
     setAnalysisProgress(0)
+    setOcrResult({
+      status: 'idle',
+      message: '画像解析を開始しています...',
+      extractedText: '',
+      itemsFound: 0
+    })
 
     try {
       const result = await Tesseract.recognize(
@@ -55,18 +80,40 @@ function App() {
       const text = result.data.text
       const extractedItems = extractDrinkItems(text)
       
-      extractedItems.forEach(item => {
-        const newItem: DrinkItem = {
-          id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-          name: item.name,
-          price: item.price,
-          count: 0
-        }
-        setDrinkItems(prev => [...prev, newItem])
-      })
+      if (extractedItems.length === 0) {
+        setOcrResult({
+          status: 'no-items',
+          message: 'ドリンクアイテムが見つかりませんでした。手動で追加してください。',
+          extractedText: text,
+          itemsFound: 0
+        })
+      } else {
+        extractedItems.forEach(item => {
+          const newItem: DrinkItem = {
+            id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+            name: item.name,
+            price: item.price,
+            count: 0
+          }
+          setDrinkItems(prev => [...prev, newItem])
+        })
+
+        setOcrResult({
+          status: 'success',
+          message: `${extractedItems.length}個のドリンクアイテムを追加しました！`,
+          extractedText: text,
+          itemsFound: extractedItems.length
+        })
+      }
 
     } catch (error) {
       console.error('OCR analysis failed:', error)
+      setOcrResult({
+        status: 'error',
+        message: `画像解析に失敗しました: ${error instanceof Error ? error.message : '不明なエラー'}`,
+        extractedText: '',
+        itemsFound: 0
+      })
     } finally {
       setIsAnalyzing(false)
       setAnalysisProgress(0)
@@ -214,6 +261,50 @@ function App() {
                       </>
                     )}
                   </Button>
+                  
+                  {/* OCR Result Display */}
+                  {ocrResult.status !== 'idle' && (
+                    <div className="mt-4 space-y-3">
+                      <div className={`p-4 rounded-lg border ${
+                        ocrResult.status === 'success' ? 'bg-green-50 border-green-200' :
+                        ocrResult.status === 'error' ? 'bg-red-50 border-red-200' :
+                        'bg-yellow-50 border-yellow-200'
+                      }`}>
+                        <div className="flex items-center gap-2 mb-2">
+                          {ocrResult.status === 'success' && <CheckCircle className="w-5 h-5 text-green-600" />}
+                          {ocrResult.status === 'error' && <XCircle className="w-5 h-5 text-red-600" />}
+                          {ocrResult.status === 'no-items' && <AlertCircle className="w-5 h-5 text-yellow-600" />}
+                          <span className={`font-medium ${
+                            ocrResult.status === 'success' ? 'text-green-800' :
+                            ocrResult.status === 'error' ? 'text-red-800' :
+                            'text-yellow-800'
+                          }`}>
+                            解析結果
+                          </span>
+                        </div>
+                        <p className={`text-sm ${
+                          ocrResult.status === 'success' ? 'text-green-700' :
+                          ocrResult.status === 'error' ? 'text-red-700' :
+                          'text-yellow-700'
+                        }`}>
+                          {ocrResult.message}
+                        </p>
+                      </div>
+                      
+                      {ocrResult.extractedText && (
+                        <details className="bg-gray-50 border border-gray-200 rounded-lg">
+                          <summary className="p-3 cursor-pointer text-sm font-medium text-gray-700 hover:bg-gray-100">
+                            抽出されたテキストを表示 ({ocrResult.extractedText.length}文字)
+                          </summary>
+                          <div className="p-3 border-t border-gray-200">
+                            <pre className="text-xs text-gray-600 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                              {ocrResult.extractedText}
+                            </pre>
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
