@@ -3,7 +3,27 @@ import { Camera, Plus, Minus, Trash2, Upload, Scan, Loader2, CheckCircle, XCircl
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import Tesseract from 'tesseract.js'
+declare global {
+  interface Window {
+    Tesseract: any;
+  }
+}
+
+const loadTesseract = (): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    if (typeof window.Tesseract !== 'undefined') {
+      resolve();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/tesseract.js@6.0.1/dist/tesseract.min.js';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load tesseract.js'));
+    document.head.appendChild(script);
+  });
+};
+
 import './App.css'
 
 interface DrinkItem {
@@ -64,11 +84,13 @@ function App() {
       itemsFound: 0
     })
 
-    let worker: Tesseract.Worker | null = null
+    let worker: any | null = null
 
     try {
-      worker = await Tesseract.createWorker(['jpn', 'eng'], 1, {
-        logger: m => {
+      await loadTesseract();
+      
+      worker = await window.Tesseract.createWorker(['jpn', 'eng'], 1, {
+        logger: (m: any) => {
           if (m.status === 'recognizing text') {
             setAnalysisProgress(Math.round(m.progress * 50))
           }
@@ -83,7 +105,7 @@ function App() {
         setAnalysisProgress(50)
         try {
           await worker.setParameters({
-            tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
+            tessedit_pageseg_mode: window.Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
           })
           
           const verticalResult = await worker.recognize(menuImage)
