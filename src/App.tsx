@@ -1,28 +1,17 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Camera, Plus, Minus, Trash2, Upload, Scan, Loader2, CheckCircle, XCircle, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { multiEngineOCR, OCRResult } from './services/ocrService'
+import { ImagePreprocessor } from './services/imagePreprocessor'
+import { OCRResultSelector } from './services/resultSelector'
 declare global {
   interface Window {
     Tesseract: any;
   }
 }
 
-const loadTesseract = (): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    if (typeof window.Tesseract !== 'undefined') {
-      resolve();
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = 'https://unpkg.com/tesseract.js@6.0.1/dist/tesseract.min.js';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load tesseract.js'));
-    document.head.appendChild(script);
-  });
-};
 
 import './App.css'
 
@@ -33,11 +22,13 @@ interface DrinkItem {
   count: number
 }
 
-interface OCRResult {
+interface OCRDisplayResult {
   status: 'idle' | 'success' | 'error' | 'no-items'
   message: string
   extractedText: string
   itemsFound: number
+  confidence?: number
+  engine?: string
 }
 
 function App() {
@@ -47,13 +38,19 @@ function App() {
   const [newItemPrice, setNewItemPrice] = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisProgress, setAnalysisProgress] = useState(0)
-  const [ocrResult, setOcrResult] = useState<OCRResult>({
+  const [ocrResult, setOcrResult] = useState<OCRDisplayResult>({
     status: 'idle',
     message: '',
     extractedText: '',
     itemsFound: 0
   })
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    return () => {
+      multiEngineOCR.cleanup().catch(console.warn)
+    }
+  }, [])
 
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -84,56 +81,55 @@ function App() {
       itemsFound: 0
     })
 
-    let worker: any | null = null
-
     try {
-      await loadTesseract();
-      
-      worker = await window.Tesseract.createWorker(['jpn', 'eng'], 1, {
-        logger: (m: any) => {
-          if (m.status === 'recognizing text') {
-            setAnalysisProgress(Math.round(m.progress * 50))
-          }
-        }
-      })
+      setAnalysisProgress(10)
+      setOcrResult(prev => ({ ...prev, message: 'OCRエンジンを初期化しています...' }))
+      await multiEngineOCR.initialize()
 
-      const result = await worker.recognize(menuImage)
-      let text = result.data.text
-      let extractedItems = extractDrinkItems(text)
+      setAnalysisProgress(20)
+      setOcrResult(prev => ({ ...prev, message: '画像を前処理しています...' }))
+      const orientation = await ImagePreprocessor.detectTextOrientation(menuImage)
+      const enhancedImage = await ImagePreprocessor.enhanceForOCR(menuImage)
+
+      setAnalysisProgress(40)
+      setOcrResult(prev => ({ ...prev, message: '複数のOCRエンジンで解析中...' }))
       
-      if (extractedItems.length === 0 && text.trim().length > 0) {
-        setAnalysisProgress(50)
-        try {
-          await worker.setParameters({
-            tessedit_pageseg_mode: window.Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
-          })
-          
-          const verticalResult = await worker.recognize(menuImage)
-          const verticalText = verticalResult.data.text
-          const verticalItems = extractDrinkItems(verticalText)
-          
-          if (verticalItems.length > 0) {
-            text = verticalText
-            extractedItems = verticalItems
-          }
-          
-          setAnalysisProgress(100)
-        } catch (verticalError) {
-          console.warn('Vertical text recognition failed:', verticalError)
-        }
+      let ocrResults: OCRResult[] = []
+      
+      const mixedResults = await multiEngineOCR.recognizeText(enhancedImage, 'mixed')
+      ocrResults.push(...mixedResults)
+
+      const hasItems = ocrResults.some(result => result.items.length > 0)
+      if (!hasItems && orientation === 'vertical') {
+        setAnalysisProgress(60)
+        setOcrResult(prev => ({ ...prev, message: '縦書きテキスト認識を試行中...' }))
+        const verticalResults = await multiEngineOCR.recognizeText(enhancedImage, 'printed', { orientation: 'vertical' })
+        ocrResults.push(...verticalResults)
       }
+
+      setAnalysisProgress(80)
+      setOcrResult(prev => ({ ...prev, message: '結果を分析中...' }))
       
-      if (extractedItems.length === 0) {
+      const filteredResults = OCRResultSelector.filterLowConfidenceResults(ocrResults, 0.1)
+      const bestResult = filteredResults.length > 0 
+        ? OCRResultSelector.selectBestResults(filteredResults)
+        : OCRResultSelector.selectBestResults(ocrResults)
+
+      setAnalysisProgress(100)
+
+      if (bestResult.items.length === 0) {
         setOcrResult({
           status: 'no-items',
-          message: text.trim().length === 0 
+          message: bestResult.text.trim().length === 0 
             ? 'テキストが検出されませんでした。画像が鮮明で文字が読みやすいかご確認ください。'
-            : 'ドリンクアイテムが見つかりませんでした。横書き・縦書き両方の認識を試みましたが、該当する項目を特定できませんでした。手動で追加してください。',
-          extractedText: text,
-          itemsFound: 0
+            : `ドリンクアイテムが見つかりませんでした。${bestResult.engine}エンジンで解析しましたが、該当する項目を特定できませんでした。手動で追加してください。`,
+          extractedText: bestResult.text,
+          itemsFound: 0,
+          confidence: bestResult.confidence,
+          engine: bestResult.engine
         })
       } else {
-        extractedItems.forEach(item => {
+        bestResult.items.forEach((item: { name: string; price: string }) => {
           const newItem: DrinkItem = {
             id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
             name: item.name,
@@ -145,101 +141,41 @@ function App() {
 
         setOcrResult({
           status: 'success',
-          message: `${extractedItems.length}個のドリンクアイテムを追加しました！`,
-          extractedText: text,
-          itemsFound: extractedItems.length
+          message: `${bestResult.items.length}個のドリンクアイテムを検出しました。${bestResult.engine}エンジンを使用。数量を調整してください。`,
+          extractedText: bestResult.text,
+          itemsFound: bestResult.items.length,
+          confidence: bestResult.confidence,
+          engine: bestResult.engine
         })
       }
 
-    } catch (error) {
-      console.error('OCR analysis failed:', error)
+    } catch (error: any) {
+      console.error('Multi-engine OCR analysis failed:', error)
       
-      let errorMessage = '画像解析に失敗しました'
+      let errorMessage = '高度なOCR解析中にエラーが発生しました。'
       
-      if (error instanceof Error) {
-        if (error.message.includes('network') || error.message.includes('fetch') || error.message.includes('NetworkError')) {
-          errorMessage = 'ネットワークエラー: インターネット接続を確認してください'
-        } else if (error.message.includes('load') || error.message.includes('worker') || error.message.includes('Worker')) {
-          errorMessage = 'OCRエンジンの読み込みに失敗しました。ページを再読み込みしてください'
-        } else if (error.message.includes('image') || error.message.includes('format') || error.message.includes('decode')) {
-          errorMessage = '画像形式エラー: JPEGまたはPNG形式の鮮明な画像をお使いください'
-        } else if (error.message.includes('memory') || error.message.includes('size') || error.message.includes('Memory')) {
-          errorMessage = '画像サイズエラー: より小さな画像をお試しください（推奨: 2MB以下）'
-        } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-          errorMessage = 'タイムアウトエラー: 画像が大きすぎる可能性があります。小さな画像でお試しください'
-        } else {
-          errorMessage = `処理エラー: ${error.message}`
-        }
-      } else {
-        errorMessage = '不明なエラーが発生しました。画像を変更してお試しください'
+      if (error.message?.includes('initialize')) {
+        errorMessage = 'OCRエンジンの初期化に失敗しました。ページを再読み込みしてお試しください。'
+      } else if (error.message?.includes('recognize') || error.message?.includes('detection')) {
+        errorMessage = '画像認識処理に失敗しました。画像形式や品質をご確認ください。'
+      } else if (error.message?.includes('network') || error.message?.includes('fetch')) {
+        errorMessage = 'ネットワークエラーが発生しました。インターネット接続をご確認ください。'
+      } else if (error.message?.includes('memory') || error.message?.includes('quota')) {
+        errorMessage = 'メモリ不足です。他のタブを閉じてお試しください。'
       }
       
       setOcrResult({
         status: 'error',
-        message: errorMessage,
+        message: `${errorMessage} (詳細: ${error.message})`,
         extractedText: '',
         itemsFound: 0
       })
     } finally {
-      if (worker) {
-        await worker.terminate()
-      }
       setIsAnalyzing(false)
       setAnalysisProgress(0)
     }
   }
 
-  const extractDrinkItems = (text: string): { name: string; price: string }[] => {
-    const lines = text.split('\n').filter(line => line.trim().length > 0)
-    const items: { name: string; price: string }[] = []
-    
-    const drinkKeywords = [
-      'ビール', 'beer', 'ハイボール', 'highball', 'サワー', 'sour', 'チューハイ', 'chuhai',
-      'ワイン', 'wine', '日本酒', 'sake', '焼酎', 'shochu', 'ウイスキー', 'whiskey',
-      'カクテル', 'cocktail', 'ジュース', 'juice', 'ソフトドリンク', 'soft drink',
-      'コーラ', 'cola', 'ウーロン茶', 'oolong', 'お茶', 'tea', 'コーヒー', 'coffee'
-    ]
-    
-    const priceRegex = /[¥￥]?\s*(\d{1,4})\s*[円¥￥]?/
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim()
-      const lowerLine = line.toLowerCase()
-      
-      const hasDrinkKeyword = drinkKeywords.some(keyword => 
-        lowerLine.includes(keyword.toLowerCase()) || line.includes(keyword)
-      )
-      
-      if (hasDrinkKeyword) {
-        const priceMatch = line.match(priceRegex)
-        let price = '¥500'
-        let name = line
-        
-        if (priceMatch) {
-          price = `¥${priceMatch[1]}`
-          name = line.replace(priceMatch[0], '').trim()
-        } else {
-          for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-            const nextLine = lines[j]
-            const nextPriceMatch = nextLine.match(priceRegex)
-            if (nextPriceMatch) {
-              price = `¥${nextPriceMatch[1]}`
-              break
-            }
-          }
-        }
-        
-        if (name.length > 1 && name.length < 20) {
-          name = name.replace(/[^\w\s\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/g, '').trim()
-          if (name.length > 0) {
-            items.push({ name, price })
-          }
-        }
-      }
-    }
-    
-    return items.slice(0, 10)
-  }
 
   const addDrinkItem = () => {
     if (newItemName.trim() && newItemPrice.trim()) {
@@ -348,9 +284,14 @@ function App() {
                             ocrResult.status === 'error' ? 'text-red-800' :
                             'text-yellow-800'
                           }`}>
-                            解析結果
+                            解析結果 {ocrResult.engine && `(${ocrResult.engine})`}
                           </span>
                         </div>
+                        {ocrResult.confidence !== undefined && (
+                          <p className="text-xs text-gray-600 mb-2">
+                            信頼度: {Math.round(ocrResult.confidence * 100)}%
+                          </p>
+                        )}
                         <p className={`text-sm ${
                           ocrResult.status === 'success' ? 'text-green-700' :
                           ocrResult.status === 'error' ? 'text-red-700' :
